@@ -525,8 +525,8 @@ const targetFps =
 perintahFfmpeg = `ffmpeg \
 -err_detect ignore_err \
 -fflags +discardcorrupt \
--analyzeduration 12M \
--probesize 12M \
+-analyzeduration 100M \
+-probesize 100M \
 -i "${file.path}" \
 -vf "scale='if(gte(iw,ih),-2,720)':'if(gte(iw,ih),720,-2)',unsharp=3:3:0.4:3:3:0.4" \
 -r ${targetFps} \
@@ -537,8 +537,8 @@ perintahFfmpeg = `ffmpeg \
 -colorspace bt709 \
 -color_trc bt709 \
 -color_primaries bt709 \
--maxrate ${Math.floor((bitrateIdeal * 2) / 1000)}k \
--bufsize ${Math.floor((bitrateIdeal * 3) / 1000)}k \
+-maxrate 12M \
+-bufsize 12M \
 -pix_fmt yuv420p \
 -threads 2 \
 -c:a aac \
