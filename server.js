@@ -533,17 +533,19 @@ perintahFfmpeg = `ffmpeg -y \
 -analyzeduration 100M \
 -probesize 100M \
 -i "${file.path}" \
--vf "scale='if(gte(iw,ih),-2,720)':'if(gte(iw,ih),720,-2)',unsharp=3:3:0.4:3:3:0.4" \
+-vf "scale='if(gte(iw,ih),-2,720)':'if(gte(iw,ih),720,-2)',unsharp=3:3:0.15:3:3:0.15" \
 -r ${targetFps} \
 -c:v libx264 \
 -preset superfast \
--crf 15 \
+-profile:v main \
+-level 4.0 \
+-crf 18 \
+-maxrate ${targetBitrateKbps} \
+-bufsize ${Math.floor((bitrateIdeal * 2) / 1000)}k \
 -aq-mode 3 \
 -colorspace bt709 \
 -color_trc bt709 \
 -color_primaries bt709 \
--maxrate 12M \
--bufsize 12M \
 -pix_fmt yuv420p \
 -threads 2 \
 -c:a aac \
