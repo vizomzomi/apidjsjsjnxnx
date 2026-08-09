@@ -475,7 +475,7 @@ if (!members.includes(nomor)) {
         const durasiVideo = await dapatkanDurasiVideo(file.path);
         
         let bitrateIdeal = Math.floor(113246208 / durasiVideo);
-if (bitrateIdeal > 4000000) bitrateIdeal = 4000000;
+if (bitrateIdeal > 2700000) bitrateIdeal = 2700000;
 if (bitrateIdeal < 1200000) bitrateIdeal = 1200000;
 
 
@@ -537,7 +537,7 @@ perintahFfmpeg = `ffmpeg -y \
 -r ${targetFps} \
 -c:v libx264 \
 -preset superfast \
--crf 17 \
+-crf 15 \
 -aq-mode 3 \
 -colorspace bt709 \
 -color_trc bt709 \
