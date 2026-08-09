@@ -539,7 +539,7 @@ perintahFfmpeg = `ffmpeg -y \
 -preset superfast \
 -profile:v main \
 -level 4.0 \
--crf 18 \
+-crf 15 \
 -maxrate ${targetBitrateKbps} \
 -bufsize ${Math.floor((bitrateIdeal * 2) / 1000)}k \
 -aq-mode 3 \
