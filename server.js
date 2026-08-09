@@ -330,9 +330,10 @@ const dapatkanDurasiVideo = (filePath) => {
 
 const dapatkanDimensiVideo = (filePath) => {
     return new Promise((resolve) => {
-        exec(
+        const proc = exec(
             `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${filePath}"`,
             (err, stdout) => {
+                clearTimeout(timer);
                 if (err) return resolve({ width: null, height: null });
                 const [w, h] = stdout.trim().split(",").map(Number);
                 resolve({
@@ -341,6 +342,10 @@ const dapatkanDimensiVideo = (filePath) => {
                 });
             }
         );
+        const timer = setTimeout(() => {
+            proc.kill('SIGKILL');
+            resolve({ width: null, height: null });
+        }, 15 * 1000);
     });
 };
 
@@ -463,7 +468,7 @@ if (!members.includes(nomor)) {
         }
 
 
-        const outputFilename = `${Date.now()}_HD_DanzClean.${isImage ? ext : 'mp4'}`
+        const outputFilename = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}_HD_DanzClean.${isImage ? ext : 'mp4'}`
 
         const normalized = path.join(__dirname, "public", outputFilename)
         
@@ -515,14 +520,14 @@ const targetFps =
         let perintahFfmpeg = "";
 
                 if (isImage) {
-    perintahFfmpeg = `ffmpeg \
+    perintahFfmpeg = `ffmpeg -y \
 -i "${file.path}" \
 -vf "scale='if(gte(iw,ih),-2,2160)':'if(gte(iw,ih),2160,-2)',unsharp=7:7:1.2:7:7:1.2,eq=contrast=1.06:saturation=1.15:brightness=0.01" \
 -q:v 1 \
 "${normalized}"`;
 } else {
     
-perintahFfmpeg = `ffmpeg \
+perintahFfmpeg = `ffmpeg -y \
 -err_detect ignore_err \
 -fflags +discardcorrupt \
 -analyzeduration 100M \
@@ -566,8 +571,9 @@ perintahFfmpeg = `ffmpeg \
             return new Promise((resolve) => {
                 const prosesFfmpeg = exec(
                     perintahFfmpeg,
-                    { maxBuffer: 30 * 1024 * 1024 }, 
+                    { maxBuffer: 30 * 1024 * 1024, detached: true }, 
                     async (err, stdout, stderr) => {
+                        sudahSelesai = true;
                         if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
 
                         const sukses = fs.existsSync(normalized) && fs.statSync(normalized).size > 500 * 1024;
@@ -614,17 +620,25 @@ perintahFfmpeg = `ffmpeg \
                     }
                 );
 
+                let sudahSelesai = false;
                 setTimeout(() => {
-                    if (prosesFfmpeg && !prosesFfmpeg.killed && global.videoProgress[videoId]?.status === "proses") {
-                        prosesFfmpeg.kill('SIGKILL');
+                    if (!sudahSelesai) {
+                        try {
+                            if (prosesFfmpeg && prosesFfmpeg.pid) {
+                                process.kill(-prosesFfmpeg.pid, 'SIGKILL');
+                            }
+                        } catch (e) {
+                            console.log("[KILL ERROR]", e.message);
+                        }
                         global.videoProgress[videoId] = {
                             status: "error",
                             message: "Timeout, proses dihentikan paksa."
                         };
                         bersihkanProgressLama(videoId);
+                        sudahSelesai = true;
                         resolve();
                     }
-                }, 5 * 60 * 1000);
+                }, 90 * 1000);
             });
         };
 
