@@ -124,8 +124,18 @@ global.blockedIPsSha = null
 })()
 
 function getClientIP(req) {
+    const cfIp = req.headers["cf-connecting-ip"]
     const forwarded = req.headers["x-forwarded-for"]
-    return forwarded ? forwarded.split(",")[0].trim() : req.ip
+    const realIp = req.headers["x-real-ip"]
+
+    let ip = cfIp || (forwarded ? forwarded.split(",")[0].trim() : realIp) || req.ip || ""
+
+    // Bersihkan prefix IPv6 jika ada
+    if (ip.startsWith("::ffff:")) {
+        ip = ip.replace("::ffff:", "")
+    }
+
+    return ip
 }
 
 app.use(cors({
@@ -220,6 +230,12 @@ app.post("/unblock-ip", verifyAdminToken, async (req, res) => {
 
 app.get("/check-ip", (req, res) => {
     const clientIP = getClientIP(req)
+
+    // Abaikan IP kosong atau IP internal localhost/proxy agar tidak terjadi blokir massal
+    if (!clientIP || clientIP === "127.0.0.1" || clientIP === "::1") {
+        return res.json({ blocked: false })
+    }
+
     res.json({ blocked: global.blockedIPs.has(clientIP) })
 })
 
