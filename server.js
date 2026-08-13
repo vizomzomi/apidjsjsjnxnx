@@ -553,7 +553,7 @@ perintahFfmpeg = `ffmpeg -y \
 -r ${targetFps} \
 -c:v libx264 \
 -preset superfast \
--crf 17 \
+-crf 15 \
 -aq-mode 3 \
 -colorspace bt709 \
 -color_trc bt709 \
