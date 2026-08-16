@@ -77,66 +77,36 @@ async function sendTelegram(text) {
     }
 }
 
-const REPO_BLOCKED_IP = "xyron11/cekverif"
-const FILE_BLOCKED_IP = "blocked-ips.json"
+const FIREBASE_DB_URL = "https://danzclean-auth-default-rtdb.asia-southeast1.firebasedatabase.app"
 
-async function getBlockedIPsFromGithub() {
+async function getUserDataByPhone(nomor) {
     try {
-        const res = await axios.get(
-            `https://api.github.com/repos/${REPO_BLOCKED_IP}/contents/${FILE_BLOCKED_IP}`,
-            { headers: { Authorization: "token " + process.env.GITHUB_TOKEN, "Cache-Control": "no-cache" } }
-        )
-        const content = Buffer.from(res.data.content, "base64").toString("utf8")
-        return { list: JSON.parse(content), sha: res.data.sha }
-    } catch (err) {
-        if (err.response && err.response.status === 404) return { list: [], sha: null }
-        console.log("[GITHUB BLOCKED-IP READ ERROR]", err.message)
-        return { list: [], sha: null }
-    }
-}
+        const [usersRes, manualRes] = await Promise.all([
+            axios.get(`${FIREBASE_DB_URL}/users.json`, {
+                params: { orderBy: '"phone"', equalTo: `"${nomor}"` }
+            }),
+            axios.get(`${FIREBASE_DB_URL}/manual_users.json`, {
+                params: { orderBy: '"phone"', equalTo: `"${nomor}"` }
+            })
+        ])
 
-async function saveBlockedIPsToGithub(list, sha) {
-    const content = Buffer.from(JSON.stringify(list, null, 2)).toString("base64")
-    try {
-        const res = await axios.put(
-            `https://api.github.com/repos/${REPO_BLOCKED_IP}/contents/${FILE_BLOCKED_IP}`,
-            { message: "update blocked-ips.json", content, sha: sha || undefined },
-            { headers: { Authorization: "token " + process.env.GITHUB_TOKEN } }
-        )
-        return res.data.content.sha
+        const usersData = usersRes.data || {}
+        const manualData = manualRes.data || {}
+
+        const found = Object.values(usersData)[0] || Object.values(manualData)[0]
+        if (!found) return null
+
+        return {
+            username: found.username || "-",
+            email: found.email || "-"
+        }
     } catch (err) {
-        console.log("[GITHUB BLOCKED-IP SAVE ERROR]", err.message)
-        return sha
+        console.log("[FIREBASE LOOKUP ERROR]", err.message)
+        return null
     }
 }
 
 const app = express()
-app.set("trust proxy", true)
-
-global.blockedIPs = new Set()
-global.blockedIPsSha = null
-
-;(async () => {
-    const { list, sha } = await getBlockedIPsFromGithub()
-    global.blockedIPs = new Set(list)
-    global.blockedIPsSha = sha
-    console.log("[BLOCKED IP LOADED]", list.length, "IP")
-})()
-
-function getClientIP(req) {
-    const cfIp = req.headers["cf-connecting-ip"]
-    const forwarded = req.headers["x-forwarded-for"]
-    const realIp = req.headers["x-real-ip"]
-
-    let ip = cfIp || (forwarded ? forwarded.split(",")[0].trim() : realIp) || req.ip || ""
-
-    // Bersihkan prefix IPv6 jika ada
-    if (ip.startsWith("::ffff:")) {
-        ip = ip.replace("::ffff:", "")
-    }
-
-    return ip
-}
 
 app.use(cors({
     origin: "*",
@@ -194,49 +164,6 @@ app.post("/request-upload-token", async (req, res) => {
     } catch (err) {
         res.status(500).json({ status: false, error: "Gagal verifikasi captcha" })
     }
-})
-
-function verifyAdminToken(req, res, next) {
-    const authHeader = req.headers.authorization
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(403).json({ status: false, error: "Forbidden" })
-    }
-    const token = authHeader.split(" ")[1]
-    try {
-        jwt.verify(token, JWT_SECRET)
-        next()
-    } catch (err) {
-        return res.status(403).json({ status: false, error: "Token tidak valid atau sudah kadaluarsa" })
-    }
-}
-
-app.post("/block-ip", verifyAdminToken, async (req, res) => {
-    const { ip } = req.body
-    if (!ip) return res.json({ status: false, error: "IP kosong" })
-    global.blockedIPs.add(ip)
-    console.log("[BLOCK IP]", ip)
-    global.blockedIPsSha = await saveBlockedIPsToGithub([...global.blockedIPs], global.blockedIPsSha)
-    res.json({ status: true, message: `IP ${ip} berhasil diblokir` })
-})
-
-app.post("/unblock-ip", verifyAdminToken, async (req, res) => {
-    const { ip } = req.body
-    if (!ip) return res.json({ status: false, error: "IP kosong" })
-    global.blockedIPs.delete(ip)
-    console.log("[UNBLOCK IP]", ip)
-    global.blockedIPsSha = await saveBlockedIPsToGithub([...global.blockedIPs], global.blockedIPsSha)
-    res.json({ status: true, message: `IP ${ip} berhasil dibuka blokirnya` })
-})
-
-app.get("/check-ip", (req, res) => {
-    const clientIP = getClientIP(req)
-
-    // Abaikan IP kosong atau IP internal localhost/proxy agar tidak terjadi blokir massal
-    if (!clientIP || clientIP === "127.0.0.1" || clientIP === "::1") {
-        return res.json({ blocked: false })
-    }
-
-    res.json({ blocked: global.blockedIPs.has(clientIP) })
 })
 
 app.get("/", (req, res) => {
@@ -383,13 +310,6 @@ function verifyUploadToken(req, res, next) {
 }
 
 app.post("/upload", verifyUploadToken, upload.single("video"), async (req, res) => {
-    const clientIP = getClientIP(req)
-
-    if (global.blockedIPs.has(clientIP)) {
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path)
-        return res.json({ status: false, error: "kamu telah diblokir oleh admin." })
-    }
-
     const file = req.file
     const nomor = req.body.nomor
 
@@ -399,66 +319,6 @@ app.post("/upload", verifyUploadToken, upload.single("video"), async (req, res) 
             fs.unlinkSync(file.path)
             return res.json({ status: false, error: "Nomor kosong" })
         }
-
-        sendTelegram(`ðŸ“¥ *Upload Masuk*\n\nIP: ${clientIP}\nNomor: ${nomor}\nFile: ${file.originalname}`)
-
-const github = await axios.get(
-  "https://api.github.com/repos/xyron11/cekverif/contents/verify.json",
-  {
-    headers: {
-      Authorization: "token " + process.env.GITHUB_TOKEN,
-      "Cache-Control": "no-cache"
-    }
-  }
-)
-
-const content = Buffer.from(
-  github.data.content,
-  "base64"
-).toString("utf8")
-
-const members = JSON.parse(content)
-
-if (!members.includes(nomor)) {
-
-    try {
-
-        const realtime = await axios.get(
-            "https://raw.githubusercontent.com/xyron11/cekverif/main/verify.json?nocache=" + Date.now(),
-            {
-                headers: {
-                    "Cache-Control": "no-cache"
-                },
-                timeout: 5000
-            }
-        )
-
-        const realtimeMembers = realtime.data || []
-
-        if (!realtimeMembers.includes(nomor)) {
-
-            fs.unlinkSync(file.path)
-
-            return res.json({
-                status: false,
-                error: "Nomor tidak ada di grup mohon nomor yang anda pakai harus masuk group dulu, bisa anda pencet tombol join group untuk masuk ke group",
-                join: "https://chat.whatsapp.com/BVtogIjS1hAD0qOMhJ3f6a"
-            })
-
-        }
-
-    } catch {
-
-        fs.unlinkSync(file.path)
-
-        return res.json({
-            status: false,
-            error: "Nomor tidak ada di grup mohon nomor yang anda pakai harus masuk group dulu, bisa anda pencet tombol join group untuk masuk ke group",
-            join: "https://chat.whatsapp.com/BVtogIjS1hAD0qOMhJ3f6a"
-        })
-
-    }
-}
 
         const ext = file.originalname.split(".").pop().toLowerCase()
         const allow = ["mp4", "mov", "mkv", "avi", "webm", "m4v", "jpg", "jpeg", "png"]
@@ -474,7 +334,7 @@ if (!members.includes(nomor)) {
             const nsfwCheck = await detectNSFW(file.path);
             if (nsfwCheck.blocked) {
                 fs.unlinkSync(file.path); 
-                sendTelegram(`ðŸš« *Deteksi Konten NSFW Ditolak!*\n\nIP: ${clientIP}\nNomor: ${nomor}\nNama File: ${file.originalname}\nStatus: Terdeteksi foto tidak senonoh.`);
+                sendTelegram(`ðŸš« *Deteksi Konten NSFW Ditolak!*\n\nNomor: ${nomor}\nNama File: ${file.originalname}\nStatus: Terdeteksi foto tidak senonoh.`);
                 
                 return res.json({
                     status: false,
@@ -616,6 +476,11 @@ perintahFfmpeg = `ffmpeg -y \
 
                         global.videoProgress[videoId] = { status: "selesai", message: "Video HD Matang!", url: resultUrl };
                         bersihkanProgressLama(videoId);
+
+                        const userData = await getUserDataByPhone(nomor)
+                        sendTelegram(
+                            `âœ… *Upload Berhasil*\n\nUsername: ${userData ? userData.username : "-"}\nEmail: ${userData ? userData.email : "-"}\nNomor: ${nomor}\nFile: ${file.originalname}`
+                        )
 
                         global.results.push({
                             url: resultUrl,
