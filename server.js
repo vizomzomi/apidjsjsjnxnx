@@ -78,6 +78,7 @@ async function sendTelegram(text) {
 }
 
 const FIREBASE_DB_URL = "https://danzclean-auth-default-rtdb.asia-southeast1.firebasedatabase.app"
+const FIREBASE_VERIFY_DB_URL = "https://danzclean-verify-default-rtdb.asia-southeast1.firebasedatabase.app"
 
 async function getUserDataByPhone(nomor) {
     try {
@@ -107,6 +108,7 @@ async function getUserDataByPhone(nomor) {
 }
 
 const app = express()
+app.set("trust proxy", true)
 
 app.use(cors({
     origin: "*",
@@ -156,14 +158,17 @@ app.post("/request-upload-token", async (req, res) => {
         )
 
         if (!verify.data.success) {
-            return res.status(403).json({ status: false, error: "Verifikasi captcha gagal, coba lagi." })
-        }
+    const kodeError = JSON.stringify(verify.data["error-codes"])
+    sendTelegram(`⚠️ *Turnstile Gagal*\n\nError codes: ${kodeError}\nWaktu: ${new Date().toISOString()}`)
+    return res.status(403).json({ status: false, error: "Verifikasi captcha gagal, coba lagi." })
+}
 
         const token = jwt.sign({ purpose: "upload-video" }, JWT_SECRET, { expiresIn: "15m" })
         res.json({ status: true, token })
     } catch (err) {
-        res.status(500).json({ status: false, error: "Gagal verifikasi captcha" })
-    }
+    sendTelegram(`❌ *Turnstile Error (Request Gagal)*\n\nPesan: ${err.message}\nWaktu: ${new Date().toISOString()}`)
+    res.status(500).json({ status: false, error: "Gagal verifikasi captcha" })
+}
 })
 
 app.get("/", (req, res) => {
@@ -292,6 +297,33 @@ const dapatkanDimensiVideo = (filePath) => {
     });
 };
 
+// Cek bitrate video sumber (bps). Kalau stream-level kosong, fallback ke format-level.
+const dapatkanBitrateVideo = (filePath) => {
+    return new Promise((resolve) => {
+        const proc = exec(
+            `ffprobe -v error -select_streams v:0 -show_entries stream=bit_rate:format=bit_rate -of default=noprint_wrappers=1 "${filePath}"`,
+            (err, stdout) => {
+                clearTimeout(timer);
+                if (err) return resolve(0);
+                const angka = stdout.match(/bit_rate=(\d+)/g) || [];
+                const nilai = angka
+                    .map(s => Number(s.split("=")[1]))
+                    .filter(n => Number.isFinite(n) && n > 0);
+                resolve(nilai.length ? Math.max(...nilai) : 0);
+            }
+        );
+        const timer = setTimeout(() => {
+            proc.kill('SIGKILL');
+            resolve(0);
+        }, 15 * 1000);
+    });
+};
+
+// Threshold buat nentuin sumber video "udah HD" -> boleh fast-path (remux tanpa re-encode)
+const HD_MIN_SISI_PENDEK = 1080;      // px, sisi pendek minimal segini
+const HD_MIN_BITRATE = 4_000_000;     // bps, ~4 Mbps ke atas dianggap sudah bagus
+const HD_MAX_FILESIZE = 250 * 1024 * 1024; // batas size yang masih wajar buat langsung di-copy
+
 function verifyUploadToken(req, res, next) {
     const authHeader = req.headers.authorization;
 
@@ -315,9 +347,40 @@ app.post("/upload", verifyUploadToken, upload.single("video"), async (req, res) 
 
     try {
         if (!file) return res.json({ status: false, error: "File kosong" })
-        if (!nomor) {
+
+        // NOTE: pengecekan nomor ada di grup atau enggak sekarang dilakukan
+        // langsung di index.html (client-side, fetch ke Firebase RTDB) biar lebih cepat.
+        // Server cuma percaya field "verified" yang dikirim dari frontend setelah lolos cek,
+        // dan tetap divalidasi ulang di sini biar gak bisa dibypass dari console/devtools.
+        const verifiedFlag = req.body.verified
+
+        if (verifiedFlag !== "true" && verifiedFlag !== true) {
             fs.unlinkSync(file.path)
-            return res.json({ status: false, error: "Nomor kosong" })
+            return res.json({
+                status: false,
+                error: "Nomor tidak ada di grup mohon nomor yang anda pakai harus masuk group dulu, bisa anda pencet tombol join group untuk masuk ke group",
+                join: "https://chat.whatsapp.com/BVtogIjS1hAD0qOMhJ3f6a"
+            })
+        }
+
+        try {
+            const cekReal = await axios.get(
+                `${FIREBASE_VERIFY_DB_URL}/verified_members.json`,
+                { timeout: 5000 }
+            )
+            const realMembers = cekReal.data || []
+
+            if (!realMembers.includes(nomor)) {
+                fs.unlinkSync(file.path)
+                return res.json({
+                    status: false,
+                    error: "Nomor tidak ada di grup mohon nomor yang anda pakai harus masuk group dulu, bisa anda pencet tombol join group untuk masuk ke group",
+                    join: "https://chat.whatsapp.com/LVXD7DEl4ZSLGEvF3uqy3Y?s=cl&p=a&ilr=1"
+                })
+            }
+        } catch (errFirebase) {
+            console.log("[FIREBASE VERIFY ERROR]", errFirebase.message)
+            
         }
 
         const ext = file.originalname.split(".").pop().toLowerCase()
@@ -387,11 +450,31 @@ const fpsVideo = await new Promise((resolve) => {
 })
 
 const targetFps =
-    fpsVideo > 60
+    (fpsVideo > 60 && fpsVideo <= 120)
         ? fpsVideo
         : 60
 
+        // ==== Cek apakah sumber video sudah "HD" -> boleh fast-path kayak WA Web ====
+        // WA Web kalau video yang dikirim udah cukup bagus, dia cuma remux/copy stream
+        // aslinya (nggak re-encode ulang). Kita niru itu: kalau resolusi & bitrate sumber
+        // udah oke serta size masih wajar, langsung -c copy. Kalau enggak, baru fallback
+        // ke pipeline compress (scale 720p + CRF 15) yang sudah ada.
+        let modeRender = "compress";
+        if (!isImage) {
+            const { width: srcWidth, height: srcHeight } = await dapatkanDimensiVideo(file.path);
+            const srcBitrate = await dapatkanBitrateVideo(file.path);
+            const srcSize = fs.statSync(file.path).size;
+            const sisiPendek = srcWidth && srcHeight ? Math.min(srcWidth, srcHeight) : 0;
 
+            const sumberSudahHD =
+                sisiPendek >= HD_MIN_SISI_PENDEK &&
+                srcBitrate >= HD_MIN_BITRATE &&
+                srcSize <= HD_MAX_FILESIZE;
+
+            if (sumberSudahHD) modeRender = "copy";
+
+            console.log(`[DanzClean] Sumber: ${srcWidth}x${srcHeight}, bitrate=${srcBitrate}, size=${srcSize} -> mode=${modeRender}`);
+        }
 
         let perintahFfmpeg = "";
 
@@ -400,6 +483,13 @@ const targetFps =
 -i "${file.path}" \
 -vf "scale='if(gte(iw,ih),-2,2160)':'if(gte(iw,ih),2160,-2)',unsharp=7:7:1.2:7:7:1.2,eq=contrast=1.06:saturation=1.15:brightness=0.01" \
 -q:v 1 \
+"${normalized}"`;
+} else if (modeRender === "copy") {
+    // FAST-PATH: remux doang, tanpa re-encode -> kualitas persis sumber (kayak WA Web)
+    perintahFfmpeg = `ffmpeg -y \
+-i "${file.path}" \
+-c copy \
+-movflags +faststart \
 "${normalized}"`;
 } else {
     
@@ -519,7 +609,7 @@ perintahFfmpeg = `ffmpeg -y \
                         sudahSelesai = true;
                         resolve();
                     }
-                }, 90 * 1000);
+                }, 300 * 1000);
             });
         };
 
